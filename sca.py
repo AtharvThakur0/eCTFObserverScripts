@@ -7,9 +7,11 @@ import argparse
 import random
 import traceback
 from tqdm import tqdm
+import pyvisa
 
 PACKET_SIZE = 128
 KEY_SIZE = 16
+ACK = b'%A\x00\x00'
 
 def main():
     
@@ -24,12 +26,19 @@ def main():
     parser.add_argument("--traces_per_plaintext", "-n", type=int, default=1, help='Number of traces to request per plaintext')
     parser.add_argument("--samples", "-s", type=int, default=1536, help='Number of samples to request per trace')
     parser.add_argument("--null_plaintext", action='store_true', help='Collect traces for null plaintext')
+    parser.add_argument("--port", type=str, default='COM3', help='Serial port to use for communication (default: COM10)')
+    parser.add_argument("--baud", type=int, default=921600, help='Baud rate for serial communication (default: 921600)')
+    parser.add_argument("--use_scope", action='store_true', default=True,help='Use oscilloscope for trace acquisition instead of ADC on the device')
+    parser.add_argument("--average_adjacent", type=int, default=5, help='Number of adjacent samples to average for noise reduction when using oscilloscope (default: 5). Set to 0 or 1 to disable averaging.')
+    parser.add_argument("--wav_start", type=int, default=1e5, help='Starting sample index for oscilloscope acquisition (default: 100000)')
+    parser.add_argument("--wav_stop", type=int, default=3.75e5, help='Stopping sample index for oscilloscope acquisition (default: 375000)')
     parser.add_argument("target_byte_indices", nargs='*', type=int, default=[0], help='Indices of the target bytes to analyze (default: [0])')
+    
 
     args = parser.parse_args()
 
     if args.test:
-        testFunctionality()
+        testFunctionality(port=args.port, baud=args.baud)
         return
     if args.generate_plaintexts:
         generatePlaintexts(args.traces_per_byte)
@@ -50,9 +59,12 @@ def main():
     target_byte_indices = args.target_byte_indices
     
     if (args.average):
-        powerTraceAvgs(traces_per_byte, traces_per_plaintext, target_byte_indices, partial=args.partial)
+        powerTraceAvgs(traces_per_byte, traces_per_plaintext, target_byte_indices, partial=args.partial,port=args.port, baud=args.baud)
     else:
-        powerTraceTimeSeries(traces_per_byte, traces_per_plaintext, target_byte_indices, samples=args.samples, partial=args.partial)
+        if args.use_scope:
+            powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, target_byte_indices, port=args.port, baud=args.baud, partial=args.partial, wav_start=args.wav_start, wav_stop=args.wav_stop, average_adjacent=args.average_adjacent)
+        else:
+            powerTraceTimeSeriesADC(traces_per_byte, traces_per_plaintext, target_byte_indices, samples=args.samples, partial=args.partial, port=args.port, baud=args.baud)
 
 
 def generatePlaintexts(traces_per_byte):
@@ -113,7 +125,7 @@ def differentialAnalysis(Sbox, filename,byte_idx):
     plt.show()
 
 # samples % PACKET_SIZE must equal 0 
-def powerTraceTimeSeries(traces_per_byte, traces_per_plaintext, target_byte_indices, port='COM10', baud=921600, partial=-1, samples=1408):
+def powerTraceTimeSeriesADC(traces_per_byte, traces_per_plaintext, target_byte_indices, port='COM10', baud=921600, partial=-1, samples=1408):
 
     
     def gracefulErrorHandler(ser, traces, byte_idx, trace_idx):
@@ -123,7 +135,7 @@ def powerTraceTimeSeries(traces_per_byte, traces_per_plaintext, target_byte_indi
         np.save(f'temporal_traces_byte_idx_{byte_idx}_partial_{trace_idx-1}.npy', traces)
         if trace_idx > 0:
             ser.close()       
-            powerTraceTimeSeries(traces_per_byte, traces_per_plaintext, target_byte_indices, port, baud, partial=trace_idx-1, samples=samples)
+            powerTraceTimeSeriesADC(traces_per_byte, traces_per_plaintext, target_byte_indices, port, baud, partial=trace_idx-1, samples=samples)
         
     plaintexts = np.load('plaintexts.npy')
 
@@ -204,7 +216,130 @@ def powerTraceTimeSeries(traces_per_byte, traces_per_plaintext, target_byte_indi
                             exit()
                             
     np.save(f'temporal_traces_byte_idx_{byte_idx}.npy', traces)
+
+def powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, target_byte_indices, port='COM3', baud=921600, partial=-1, wav_start=1e5, wav_stop=3.75e5, average_adjacent=5):
+
     
+    def gracefulErrorHandler(ser, traces, byte_idx, trace_idx):
+        
+        ser.read_all()
+        traces[trace_idx,:] = 0
+        np.save(f'temporal_traces_byte_idx_{byte_idx}_partial_{trace_idx-1}.npy', traces)
+        if trace_idx > 0:
+            ser.close()       
+            powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, target_byte_indices, port, baud, partial=trace_idx-1, wav_start=wav_start, wav_stop=wav_stop, average_adjacent=average_adjacent)
+        
+    rm = pyvisa.ResourceManager()
+    res = rm.list_resources()
+    print(res)
+    scope = rm.open_resource(res[0])
+    # print(inst.query('*IDN?'))
+
+    #scope.write(":CHAN1:DISP ON")
+    #scope.write(":CHAN1:SCAL 1.000000e-02")  
+    #scope.write(":CHAN1:OFFS 0")
+    # scope.write(":CHAN1:PROB 1") 
+    #scope.write(":CHAN1:RANG .5")
+
+    #scope.write(":ACQ:MDEP 12000")
+    #scope.write(":TIM:MAIN:SCAL .5e-03")
+    print(f"Acquiring from scope at {scope.query(':ACQ:SRAT?')} Sa/s")
+
+    #scope.write(":TIMebase:DELay:OFFSet -1")
+
+    #scope.write(":TRIG:MODE EDGE")
+    #scope.write(":TRIG:EDGE:SOUR CHAN2")
+    #scope.write(":TRIG:EDGE:SLOP POS")
+    #scope.write(":TRIG:EDGE:LEV 0.5")   
+
+    scope.write(":WAV:SOUR CHAN1")
+    scope.write(":WAV:MODE RAW")
+    scope.write(":WAV:FORM BYTE")
+
+    scope.write(f":WAV:STAR {wav_start}")
+    scope.write(f":WAV:STOP {wav_stop}")
+
+    averaged_trace_size = int(wav_stop-wav_start)//(1 if average_adjacent <= 0 else average_adjacent)
+
+    plaintexts = np.load('plaintexts.npy')
+    
+    for byte_idx in target_byte_indices:
+        if (partial >= 0):
+            traces = np.load(f'temporal_traces_byte_idx_{byte_idx}_partial_{partial}.npy')
+            print(f"On byte index {byte_idx}, resuming from byte value {partial}")
+        else:
+            traces = np.zeros((traces_per_byte, averaged_trace_size), dtype=np.int8)
+        
+        with serial.Serial(port, baud) as ser:
+            while (ser.in_waiting > 0):
+                ser.read_all()  # Clear the buffer before starting
+            
+            #                     2 3 4 5 6 7|8|9|10 11
+            msg =  bytearray(b'p_\0\0\0\0\0\0\0\0\0\0')
+            msg[9] = np.int8(np.log2(traces_per_plaintext,)) # accepts left shift as argument for fast arithmetic
+            msg[-2:] = struct.pack('<H', 2048) # 2048 is dummy value since we will be acquiring the trace directly from the oscilloscope instead of the ADC on the device 
+            
+            starting_trace_idx = partial if (partial > 0) else 0
+            print(f"Starting from trace index {starting_trace_idx}")
+            for trace_idx in tqdm(range(starting_trace_idx, traces_per_byte), desc=f"Collecting traces for byte index {byte_idx}", unit="trace", leave=False):
+                try:
+                    msg[2:8] = bytes(plaintexts[trace_idx,:6])
+                    
+                    ser.write(msg)
+                    while (ser.in_waiting < 2):
+                        pass # to allow interrupt
+                    while (ser.in_waiting):
+                        ser.read_all();
+                        ser.write(ACK);
+                        time.sleep(.01)
+                     
+                    trigger_status = scope.query(":TRIG:STAT?");
+                    while (trigger_status[0] != "S"):
+                        print(f"STATUS: {trigger_status}")
+                        trigger_status = scope.query(":TRIG:STAT?");
+
+                    data = np.array(scope.query_binary_values(":WAV:DATA?", datatype='B'))
+                    
+                    if (len(data) > 0):
+                        trace = np.zeros((averaged_trace_size,), dtype=np.int16)
+                        for i in range(average_adjacent): # average across adjacent samples
+                            trace += data[i::average_adjacent][:averaged_trace_size] # cut off extras
+                        trace //= (average_adjacent if average_adjacent > 0 else 1)
+                        traces[trace_idx,:] = trace
+                    else:
+                        print(f"No data saved on byte index {byte_idx}, trace index {trace_idx}")
+                        gracefulErrorHandler(ser, traces, byte_idx, trace_idx)
+                        return
+
+                    scope.write(":SING")
+                    
+                    # wait for it reset
+                    status = scope.query("*OPC?");
+                    while ( status[0] != '1'):
+                        #print(f"STATUS: {status}")
+                        status = scope.query("*OPC?");
+
+
+                    # print(f"Received trace packet for byte value {byte_val}, trace index {trace_idx}, packet start {pkt_start}, packet end {pkt_end}, with values: {trace}")    
+                except KeyboardInterrupt as e:
+                    val = 'v'
+                    print(f"{e}\nData collection interrupted by user.")
+                    traceback.print_exc()
+                    while val == 'v':
+                        val = input("Type 'v' to see current values, reset the device and type \'c\' to continue, or enter any other key to exit and save collected traces...")
+                        if val == 'v':
+                            print(f"Current values: {traces[:trace_idx,:]}")
+                        elif val == 'c':
+                            print("Resuming data collection...")
+                            gracefulErrorHandler(ser, traces, trace_idx)
+                            return
+                        else:
+                            np.save(f'temporal_traces_byte_idx_{byte_idx}_partial_{trace_idx-1}.npy', traces)
+                            exit()
+                            
+    np.save(f'temporal_traces_byte_idx_{byte_idx}.npy', traces)
+
+
 def powerTraceAvgs(traces_per_value, traces_per_plaintext, target_byte_indices, port='COM10', baud=115200, partial=-1):
 
     
@@ -274,8 +409,8 @@ def powerTraceAvgs(traces_per_value, traces_per_plaintext, target_byte_indices, 
         print(avgs)
         np.save(f'traces_byte_idx_{byte_idx}.npy', avgs)
 
-def testFunctionality():
-    with serial.Serial('COM10',921600) as ser:
+def testFunctionality(port='COM10', baud=921600):
+    with serial.Serial(port, baud) as ser:
         while ser.in_waiting > 0:
             print(ser.read_all())
             time.sleep(0.01)
@@ -288,13 +423,11 @@ def testFunctionality():
             time.sleep(0.01)
         ser.write(b'e')
         '''
-        ser.write(b'p_\0\2\0\0\0\0\0\2')
-        time.sleep(0.1)
-        while ser.in_waiting < 8:
-            pass
-        raw_data = ser.read_all()
-        v = struct.unpack('<II', raw_data)
-        print(f"Received trace: {v}, with average power {4095 - v[1]/v[0] if v[0] > 0 else 0}")
+        ser.write(b'p')
+        time.sleep(.1)
+        while ser.in_waiting > 0:
+            print(ser.read_all())
+            time.sleep(0.01)
 
 def getSbox():
     t = [0]*256
