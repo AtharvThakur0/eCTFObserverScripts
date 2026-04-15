@@ -1,8 +1,11 @@
 import pyvisa
 import serial
 import numpy as np
+from smooth import smooth
 import time
 import argparse
+
+ACK = b'%A\x00\x00'
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--port", default="COM3", help="Serial port")
@@ -50,39 +53,98 @@ print(f"Acquiring at {scope.query(':ACQ:SRAT?')}")
 #scope.write(":TRIG:EDGE:SLOP POS")
 #scope.write(":TRIG:EDGE:LEV 0.5")   
 
+wav_start = 2.5e5
+wav_stop = 4e5
+wav_tolerance = int(1.5e5)
+sample_start = int(wav_start-wav_tolerance)
+scope.write(f":WAV:STAR {sample_start}")
+scope.write(f":WAV:STOP {wav_stop}")
+
 scope.write(":WAV:SOUR CHAN1")
 scope.write(":WAV:MODE RAW")
 scope.write(":WAV:FORM BYTE")
 
-scope.write(":WAV:STAR 100000")
-scope.write(":WAV:STOP 475000")
+traces_to_average = 1
 
-i=0
+trig_idx = None
+
 with serial.Serial(args.port, args.baudrate) as ser:
     while True:
-        ser.write(b'p')
-        print("Sent trigger to device, waiting for data...")
-        print(scope.query("*OPC?"))
+        traces = np.zeros((traces_to_average, int(wav_stop-wav_start)), dtype=np.uint8)
+        for i in range(traces_to_average):
+        
+            ser.write(b'p')
+            #print("Sent trig
 
-        '''
-        print(scope.query(":TRIG:STAT?"))
-        print(scope.query(":ACQ:SRAT?"))
-        print(scope.query(":WAV:PRE?"))
-        '''
-         
-        while (ser.in_waiting):
-            ser.read_all();
-        #input("Press Enter to continue...")
-        data = scope.query_binary_values(":WAV:DATA?", datatype='B')
-        data = np.array(data)
+            '''
+            print(scope.query(":TRIG:STAT?"))
+            print(scope.query(":ACQ:SRAT?"))
+            print(scope.query(":WAV:PRE?"))
+            '''
+            time.sleep(.1)
+            while (ser.in_waiting):
+                ser.read_all();
+                ser.write(ACK);
+                time.sleep(.01)
+
+            
+            trigger_status = scope.query(":TRIG:STAT?");
+            while (trigger_status[0] != "S"):
+                #print(f"STATUS: {trigger_status}")
+                trigger_status = scope.query(":TRIG:STAT?");
+            #input("Press Enter to continue...")
+            data = scope.query_binary_values(":WAV:DATA?", datatype='B')
+            data = -np.array(data, dtype=np.uint8)
+            if (len(data) == 0):
+                print(f"No data received from scope on trace {i}, exiting.")
+                exit(-1)
+
+            if (trig_idx is None): # the RIGOL trig pos query is unreliable
+                scope.write(":WAV:SOUR CHAN2")
+                
+                scope.write(f":WAV:STOP {wav_start+wav_tolerance}")
+                time.sleep(.1)
+                trigger_data = scope.query_binary_values(":WAV:DATA?", datatype='B')
+                trig_idx = np.argmax(np.abs(np.diff(trigger_data)))
+                print(f"Calculated idx: {trig_idx}")
+
+                
+                scope.write(":WAV:SOUR CHAN1")
+                scope.write(f":WAV:STOP {wav_stop}")
+
+            data = data[(trig_idx):(trig_idx+int(wav_stop-wav_start))]
 
 
-        if (len(data) > 0):
-            np.savetxt(f"power_traces/{i}.csv",data, delimiter=',');
-            print("Saved data to file   "+f"power_traces/{i}.csv")
-            i+=1
-        else:
-            print("No data saved")
+            '''
+            average_adjacent = 2
+            averaged_trace_size = len(data)//average_adjacent
+            trace = np.zeros(averaged_trace_size, dtype=np.uint16)
+            for j in range(average_adjacent): # average across adjacent samples
+                trace += data[j::average_adjacent][:averaged_trace_size] # cut off extras
+            trace //= (average_adjacent if average_adjacent > 0 else 1)
+            '''
 
-        #scope.write(":SING")
+            if (len(data) > 0):
+                pass
+            else:
+                print("No data saved")
+                exit(-1)
+            
+            traces[i,:] = data
+        
+            if (i < traces_to_average-1):
+                scope.write(":SING")
+            
+            status = scope.query("*OPC?");
+            while ( status[0] != '1'):
+                #print(f"STATUS: {status}")
+                status = scope.query("*OPC?");
+
+            time.sleep(.1)
+
+        traces = smooth(traces)
+        trace = np.mean(traces, axis=0)
+        np.savetxt(f"power_traces/{i}.csv",trace, delimiter=',');
+        print("Saved data to file   "+f"power_traces/{i}.csv")
+        
         break;
