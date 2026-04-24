@@ -28,22 +28,22 @@ def firstdiffsmooth(traces, threshold=1):
     traces[spikes] = np.concatenate((np.zeros((candidates.shape[0],1), dtype=traces.dtype), traces[:,:-1]), axis=1)[spikes]
     return traces
 
-def savgol(traces, window_length=6, polyorder=4):
+def savgol(traces, window_length=6, polyorder=3):
     return savgol_filter(traces, window_length=window_length, polyorder=polyorder, axis=1)
 
 def smooth(traces):
     traces = percentOutlierSmooth(traces)
     traces = savgol(traces)
     return traces
-def percentOutlierSmooth(traces, threshold=99.95):
+def percentOutlierSmooth(traces, threshold=99.96):
     upper = np.percentile(traces, threshold,axis=1, keepdims=True)
     lower = np.percentile(traces, 100-threshold,axis=1, keepdims=True)
     #print(f"upper: {upper}")
     #print(f"lower: {lower}")
     #outliers = (traces > upper) | (traces < lower)
     #traces[outliers] = shift(traces, 1)[outliers] # replace outliers with left neighbor;
-    traces[traces > upper] -= 50;
-    traces[traces < lower] += 50;
+    traces[traces > upper] -= 60;
+    traces[traces < lower] += 60;
     return traces
     use = [-3,-2,-1,1,2,3]
     local_vals = np.array([shift(traces, i) for i in use])
@@ -71,8 +71,7 @@ def shift(traces, shift_amount):
         return traces
 
 
-
-def twolinefitsmooth(traces, threshold=1, min_line_gap=40):
+def getTwoLineFits(traces, min_line_gap=40):
     mabserror = np.zeros((traces.shape[0],256), dtype=np.float32)
     for i in range(256):
         mabserror[:,i] = np.mean(np.abs(traces - i), axis=1)
@@ -84,6 +83,11 @@ def twolinefitsmooth(traces, threshold=1, min_line_gap=40):
     too_close = np.abs(candidate_levels[None, :] - minidx[:, None]) < min_line_gap
     mabserror2[too_close] = np.inf
     secondminidx = np.argmin(mabserror2, axis=1)
+    return minidx, secondminidx
+
+def twolinefitsmooth(traces, threshold=1, min_line_gap=40):
+    
+    minidx, secondminidx = getTwoLineFits(traces, min_line_gap)
     print(f"minidx: {minidx}")
     print(f"secondminidx: {secondminidx}")
 

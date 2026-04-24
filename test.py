@@ -54,7 +54,7 @@ print(f"Acquiring at {scope.query(':ACQ:SRAT?')}")
 #scope.write(":TRIG:EDGE:LEV 0.5")   
 
 wav_start = 2.5e5
-wav_stop = 4e5
+wav_stop = 3.65e5
 wav_tolerance = int(1.5e5)
 sample_start = int(wav_start-wav_tolerance)
 scope.write(f":WAV:STAR {sample_start}")
@@ -130,7 +130,7 @@ with serial.Serial(args.port, args.baudrate) as ser:
                 print("No data saved")
                 exit(-1)
             
-            traces[i,:] = data
+            traces[i,:len(data)] = data
         
             if (i < traces_to_average-1):
                 scope.write(":SING")

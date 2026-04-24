@@ -22,17 +22,18 @@ def main():
     parser.add_argument('--differential', '-d', default='', help='Perform differential analysis on collected traces')
     parser.add_argument("--partial", type=int, default=-1,help='Restart from partial trace #')
     parser.add_argument("--average", action='store_true', help='Collect power traces and compute averages for each byte value (OUTDATED)')
-    parser.add_argument("--traces_per_byte", "-m", type=int, default=80, help='Number of plaintexts to trace')
+    parser.add_argument("--traces_per_byte", "-m", type=int, default=750, help='Number of plaintexts to trace')
     parser.add_argument("--traces_per_plaintext", "-n", type=int, default=1, help='Number of traces to request per plaintext')
     parser.add_argument("--samples", "-s", type=int, default=1536, help='Number of samples to request per trace')
     parser.add_argument("--null_plaintext", action='store_true', help='Collect traces for null plaintext')
     parser.add_argument("--port", type=str, default='COM3', help='Serial port to use for communication (default: COM10)')
     parser.add_argument("--baud", type=int, default=921600, help='Baud rate for serial communication (default: 921600)')
     parser.add_argument("--use_scope", action='store_true', default=True,help='Use oscilloscope for trace acquisition instead of ADC on the device')
-    parser.add_argument("--average_adjacent", type=int, default=1, help='Number of adjacent samples to average for noise reduction when using oscilloscope (default: 5). Set to 0 or 1 to disable averaging.')
+    parser.add_argument("--average_across", type=int, default=2, help='Number of samples to average for noise reduction when using oscilloscope (default: 5). Set to 0 or 1 to disable averaging.')
+    parser.add_argument("--average_adjacent", type=int, default=1, help='Number of adjacent samples to average together for noise reduction when using oscilloscope (default: 1, meaning no averaging). Set to >1 to enable adjacent sample averaging.')
     parser.add_argument("--wav_start", type=int, default=2.5e5, help='Starting sample index for oscilloscope acquisition (default: 100000)')
-    parser.add_argument("--wav_stop", type=int, default=4e5, help='Stopping sample index for oscilloscope acquisition (default: 375000)')
-    parser.add_argument("--wav_tolerance", type=int, default=int(1.5e5), help='Extra window to search for start of AES cycles')
+    parser.add_argument("--wav_stop", type=int, default=3.5e5, help='Stopping sample index for oscilloscope acquisition (default: 375000)')
+    parser.add_argument("--wav_tolerance", type=int, default=int(.5e5), help='Extra window to search for start of AES cycles')
     parser.add_argument("target_byte_indices", nargs='*', type=int, default=[0], help='Indices of the target bytes to analyze (default: [0])')
     
 
@@ -63,7 +64,7 @@ def main():
         powerTraceAvgs(traces_per_byte, traces_per_plaintext, target_byte_indices, partial=args.partial,port=args.port, baud=args.baud)
     else:
         if args.use_scope:
-            powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, target_byte_indices, port=args.port, baud=args.baud, partial=args.partial, wav_start=args.wav_start, wav_stop=args.wav_stop, wav_tolerance=args.wav_tolerance, average_adjacent=args.average_adjacent)
+            powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, target_byte_indices, port=args.port, baud=args.baud, partial=args.partial, wav_start=args.wav_start, wav_stop=args.wav_stop, wav_tolerance=args.wav_tolerance, average_across=args.average_across)
         else:
             powerTraceTimeSeriesADC(traces_per_byte, traces_per_plaintext, target_byte_indices, samples=args.samples, partial=args.partial, port=args.port, baud=args.baud)
 
@@ -84,7 +85,7 @@ def correlationAnalysis(Sbox, filename, byte_idx):
         hypothetical_distances = np.array([hammingWeight(Sbox[plaintext_byte^key_guess]) for plaintext_byte in plaintexts[:,byte_idx]], dtype=np.float32)
         for t in range(traces.shape[1]):
             rho_vs_t[key_guess, t] = np.corrcoef(hypothetical_distances, traces[:,t],dtype=np.float32)[0,1]
-    np.save(f'cc_xor_to_sbox_diff', rho_vs_t)
+    np.save(filename+f'_cc_xor_to_sbox_hw', rho_vs_t)
 
     optimal_vals = np.max(np.abs(rho_vs_t),axis=1)
     best_key_guess = np.argmax(optimal_vals)
@@ -218,7 +219,7 @@ def powerTraceTimeSeriesADC(traces_per_byte, traces_per_plaintext, target_byte_i
                             
     np.save(f'temporal_traces_byte_idx_{byte_idx}.npy', traces)
 
-def powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, target_byte_indices, port='COM3', baud=921600, partial=-1, wav_start=1e5, wav_stop=3.75e5, wav_tolerance=40000, average_adjacent=5):
+def powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, target_byte_indices, port='COM3', baud=921600, partial=-1, wav_start=1e5, wav_stop=3.75e5, wav_tolerance=40000, average_across=5, average_adjacent=1):
 
     
     def gracefulErrorHandler(ser, scope, traces, byte_idx, trace_idx):
@@ -230,7 +231,7 @@ def powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, targ
             ser.close()  
             scope.write(":SING") # reset the scope from waiting for trigger
             time.sleep(.01)
-            powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, target_byte_indices, port, baud, partial=trace_idx-1, wav_start=wav_start, wav_stop=wav_stop, wav_tolerance=wav_tolerance, average_adjacent=average_adjacent)
+            powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, target_byte_indices, port, baud, partial=trace_idx-1, wav_start=wav_start, wav_stop=wav_stop, wav_tolerance=wav_tolerance, average_across=average_across, average_adjacent=average_adjacent)
         
     rm = pyvisa.ResourceManager()
     res = rm.list_resources()
@@ -239,7 +240,7 @@ def powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, targ
     # print(inst.query('*IDN?'))
 
     #scope.write(":CHAN1:DISP ON")
-    #scope.write(":CHAN1:SCAL 1.000000e-02")  
+    #.write(":CHAN1:SCAL 1.000000e-02")  
     #scope.write(":CHAN1:OFFS 0")
     # scope.write(":CHAN1:PROB 1") 
     #scope.write(":CHAN1:RANG .5")
@@ -286,86 +287,105 @@ def powerTraceTimeSeriesOscilloscope(traces_per_byte, traces_per_plaintext, targ
             trig_idx = None
             print(f"Starting from trace index {starting_trace_idx}")
             for trace_idx in tqdm(range(starting_trace_idx, traces_per_byte), desc=f"Collecting traces for byte index {byte_idx}", unit="trace", leave=False):
-                try:
+                collector = np.zeros((average_across,averaged_trace_size), dtype=np.uint32)
+                for average_idx in range(average_across):
+                    try:
 
-                    msg[2:8] = bytes(plaintexts[trace_idx,:6])
-                    
-                    ser.write(msg)
-                    while (ser.in_waiting < 2):
-                        pass # to allow interrupt
-                    while (ser.in_waiting):
-                        ser.read_all();
-                        ser.write(ACK);
-                        time.sleep(.01)
-                     
-                    trigger_status = scope.query(":TRIG:STAT?");
-                    while (trigger_status[0] != "S"):
-                        #print(f"STATUS: {trigger_status}")
-                        trigger_status = scope.query(":TRIG:STAT?");
-
-                    data = -np.array(scope.query_binary_values(":WAV:DATA?", datatype='B'), dtype=np.uint8)
-
-                    if (len(data) > 0):
-                            
-                        if (trig_idx is None): # the RIGOL trig pos query is unreliable
-                            scope.write(":WAV:SOUR CHAN2")
-                            
-                            scope.write(f":WAV:STOP {wav_start+wav_tolerance}")
-                            trigger_data = scope.query_binary_values(":WAV:DATA?", datatype='B')
-
-                            trig_idx = np.argmax(np.abs(np.diff(trigger_data)))
+                        msg[2:8] = bytes(plaintexts[trace_idx,:6])
                         
-                            scope.write(":WAV:SOUR CHAN1")
-                            scope.write(f":WAV:STOP {wav_stop}")
+                        ser.write(msg)
+                        while (ser.in_waiting < 2):
+                            pass # to allow interrupt
+                        while (ser.in_waiting):
+                            ser.read_all();
+                            ser.write(ACK);
+                            time.sleep(.01)
+                        
+                        trigger_status = scope.query(":TRIG:STAT?");
+                        while (trigger_status[0] != "S"):
+                            #print(f"STATUS: {trigger_status}")
+                            trigger_status = scope.query(":TRIG:STAT?");
 
-                        data = data[trig_idx:(trig_idx+int(wav_stop-wav_start))]
-                        trimmed_length = len(data)
-                        if (np.std(data) < .05*np.mean(data)): # sanity check for failed acquisition with very low variance 
-                            print(f"Warning: Received trace data has very low variance, likely indicating a failed acquisition. Trace Index {trace_idx}, Data: {data}.")
-                            gracefulErrorHandler(ser, scope, traces, byte_idx, trace_idx)
-                            exit()
+                        data = -np.array(scope.query_binary_values(":WAV:DATA?", datatype='B'), dtype=np.uint8)
 
-                        if (average_adjacent > 1):
-                            trace = np.zeros((averaged_trace_size,), dtype=np.uint16)
-                            for i in range(average_adjacent): # average across adjacent samples
-                                trace += data[i::trimmed_length][:trimmed_length] # cut off extras
-                            trace //= (average_adjacent if average_adjacent > 0 else 1)
+                        if (len(data) > 0):
+                                
+                            if (trig_idx is None): # the RIGOL trig pos query is unreliable
+                                scope.write(":WAV:SOUR CHAN2")
+                                
+                                scope.write(f":WAV:STOP {wav_start+wav_tolerance}")
+                                time.sleep(.2)
+                                trigger_data = scope.query_binary_values(":WAV:DATA?", datatype='B')
+                                if (len(trigger_data) == 0):
+                                    print(f"Warning: No trigger data received from scope, likely indicating a failed acquisition. Trace Index {trace_idx}.")
+                                    gracefulErrorHandler(ser, scope, traces, byte_idx, trace_idx)
+                                    return
+
+                                trig_idx = np.argmax(np.abs(np.diff(trigger_data)))
+                                print(f"Calculated trig idx: {trig_idx}")
+                            
+                                scope.write(":WAV:SOUR CHAN1")
+                                #scope.write(f":WAV:STAR {wav_start}")
+                                scope.write(f":WAV:STOP {wav_stop}")
+
+                            data = data[trig_idx:(trig_idx+int(wav_stop-wav_start))]
+                            trimmed_length = len(data)
+                            if (np.std(data) < .05*np.mean(data)): # sanity check for failed acquisition with very low variance 
+                                print(f"Warning: Received trace data has very low variance, likely indicating a failed acquisition. Trace Index {trace_idx}, Data: {data}.")
+                                gracefulErrorHandler(ser, scope, traces, byte_idx, trace_idx)
+                                exit()
+                            if (trimmed_length < averaged_trace_size//2): # sanity check for failed acquisition with very low number of samples
+                                print(f"Warning: Received trace data has very low number of samples after trimming, likely indicating a failed acquisition. Trace Index {trace_idx}, Data Length: {trimmed_length}.")
+                                gracefulErrorHandler(ser, scope, traces, byte_idx, trace_idx)
+                                exit()
+
+                            if (average_adjacent > 1):
+                                trace = np.zeros((averaged_trace_size,), dtype=np.uint16)
+                                for i in range(average_adjacent): # average across adjacent samples
+                                    trace += data[i::trimmed_length][:trimmed_length] # cut off extras
+                                trace //= (average_adjacent if average_adjacent > 0 else 1)
+                            else:
+                                if trimmed_length >= averaged_trace_size:
+                                    trace = data[:averaged_trace_size]
+                                else:
+                                    trace = np.pad(data, (0, averaged_trace_size - trimmed_length), mode='edge')[:averaged_trace_size] # pad with zeros if we got less samples than expected
+                            collector[average_idx,:] = trace
                         else:
-                            trace = np.pad(data,(0,averaged_trace_size-trimmed_length), mode='edge')[:averaged_trace_size] # pad with zeros if we got less samples than expected
-                        traces[trace_idx,:] = trace
-                    else:
-                        print(f"No data saved on byte index {byte_idx}, trace index {trace_idx}")
-                        gracefulErrorHandler(ser, scope, traces, byte_idx, trace_idx)
-                        return
-
-                    scope.write(":SING")
-                    
-                    # wait for it reset
-                    status = scope.query("*OPC?");
-                    while ( status[0] != '1'):
-                        #print(f"STATUS: {status}")
-                        status = scope.query("*OPC?");
-
-                    time.sleep(.01) # experimentally necessary for stability before next trigger
-
-
-                    # print(f"Received trace packet for byte value {byte_val}, trace index {trace_idx}, packet start {pkt_start}, packet end {pkt_end}, with values: {trace}")    
-                except KeyboardInterrupt as e:
-                    val = 'v'
-                    print(f"{e}\nData collection interrupted by user.")
-                    traceback.print_exc()
-                    while val == 'v':
-                        val = input("Type 'v' to see current values, reset the device and type \'c\' to continue, or enter any other key to exit and save collected traces...")
-                        if val == 'v':
-                            print(f"Current values: {traces[:trace_idx,:]}")
-                        elif val == 'c':
-                            print("Resuming data collection...")
+                            print(f"No data saved on byte index {byte_idx}, trace index {trace_idx}")
                             gracefulErrorHandler(ser, scope, traces, byte_idx, trace_idx)
                             return
-                        else:
-                            np.save(f'temporal_traces_byte_idx_{byte_idx}_partial_{trace_idx-1}.npy', traces)
-                            exit()
-                            
+
+                        scope.write(":SING")
+                        
+                        # wait for it reset
+                        status = scope.query("*OPC?");
+                        while ( status[0] != '1'):
+                            #print(f"STATUS: {status}")
+                            status = scope.query("*OPC?");
+
+                        time.sleep(.01) # experimentally necessary for stability before next trigger
+
+
+                        # print(f"Received trace packet for byte value {byte_val}, trace index {trace_idx}, packet start {pkt_start}, packet end {pkt_end}, with values: {trace}")    
+                    except KeyboardInterrupt as e:
+                        val = 'v'
+                        print(f"{e}\nData collection interrupted by user.")
+                        traceback.print_exc()
+                        while val == 'v':
+                            val = input("Type 'v' to see current values, reset the device and type \'c\' to continue, or enter any other key to exit and save collected traces...")
+                            if val == 'v':
+                                print(f"Current values: {traces[:trace_idx,:]}")
+                            elif val == 'c':
+                                print("Resuming data collection...")
+                                gracefulErrorHandler(ser, scope, traces, byte_idx, trace_idx)
+                                return
+                            else:
+                                np.save(f'temporal_traces_byte_idx_{byte_idx}_partial_{trace_idx-1}.npy', traces)
+                                exit()
+
+                    
+                    traces[trace_idx,:] = np.mean(collector, axis=0) if average_across > 1 else collector[0,:]
+                                
     np.save(f'temporal_traces_byte_idx_{byte_idx}.npy', traces)
     print(f"Traces for byte index {byte_idx} collected and saved.")
 
